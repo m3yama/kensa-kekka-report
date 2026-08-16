@@ -31,15 +31,41 @@ Dify版が「撮影 → OCR → LLM転記 → DB保存」というデータの�
 
 ## 構成
 
-ワークフローはn8nコンテナ内のSQLiteで管理しており、ソースコードとしては
-`kensa-kekka-report.json`(エクスポートしたワークフロー定義)のみを本リポジトリで管理する。
+ワークフローはn8nコンテナ内のSQLiteで管理しており、本リポジトリでは以下の2ファイルのみを管理する。
 
-n8nの画面から「Import from File」で読み込むことで復元できる。バックエンド(FastAPI、
-`/trend_n8n`等)はDify版と共通のため、[kensa-kekka-ai](https://github.com/m3yama/kensa-kekka-ai)を参照。
+- `kensa-kekka-report.json` — エクスポートしたワークフロー定義。n8nの画面から「Import from File」で読み込むことで復元できる
+- `seed.sql` — 動作確認用のテストデータ(下記)
+
+バックエンド(FastAPI、`/trend_n8n`等)はDify版と共通のため、[kensa-kekka-ai](https://github.com/m3yama/kensa-kekka-ai)を参照。
+
+## テスト用データ
+
+`seed.sql`で動作確認用のダミーデータを用意している。
+
+- 慢性的に基準値外(総コレステロール)
+- 今回はじめて基準値外になった(白血球数・中性脂肪)
+- 常に範囲内で通知対象から除外される(血糖)
+
+```bash
+sqlite3 lab_results_n8n.db < seed.sql
+```
 
 ## 使用技術
 
 - n8n(ワークフロー自動化、Docker)
+- FastAPI（バックエンドAPI）
+- SQLite（検査結果データ管理）
 - Ollama(所見コメント生成)
 - Google Sheets API(記録更新)
 - Discord Webhook(通知)
+
+---
+
+## 注意事項
+
+- 本システムが生成する所見は**医療アドバイスではない**。診断・治療方針は主治医の判断による
+- 本ワークフローが行うのはOllamaでの所見生成と、Discord・スプレッドシートへの通知のみ。
+  検査データの取り込み・保存は行わない(Dify版の担当)。外部に出るのはDiscord WebhookとGoogle
+  スプレッドシートへの通知内容のみ
+
+
