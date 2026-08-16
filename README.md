@@ -21,6 +21,8 @@ Dify版が「撮影 → OCR → LLM転記 → DB保存」というデータの�
                   → 通知済みを記録
 ```
 
+![ワークフロー全体](docs/n8n_canvas.png)
+
 ## 役割分担
 
 | 項目 | Dify版(kensa-kekka-ai) | n8n版(本リポジトリ) |
@@ -49,6 +51,15 @@ Dify版が「撮影 → OCR → LLM転記 → DB保存」というデータの�
 ```bash
 sqlite3 lab_results_n8n.db < seed.sql
 ```
+
+このデータから生成したPDFレポート(1ページ目: 推移グラフ、2ページ目: AIによる所見コメント)。
+
+![PDFレポートのサンプル(推移グラフ)](docs/report_sample_p1.png)
+![PDFレポートのサンプル(所見コメント)](docs/report_sample_p2.png)
+
+このレポートがDiscordに届いたときの通知。
+
+![Discord通知のサンプル](docs/discord_notification.png)
 
 ## 使用技術
 
