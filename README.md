@@ -63,12 +63,13 @@ sqlite3 lab_results_n8n.db < seed.sql
 
 ## 使用技術
 
-- n8n(ワークフロー自動化、Docker)
+- n8n (ワークフロー自動化、Docker)
 - FastAPI（バックエンドAPI）
 - SQLite（検査結果データ管理）
-- Ollama(所見コメント生成)
-- Google Sheets API(記録更新)
-- Discord Webhook(通知)
+- Ollama (所見コメント生成)
+- Google Sheets API (記録更新)
+- PDF（レポート生成）
+- Discord Webhook (通知)
 
 ---
 
