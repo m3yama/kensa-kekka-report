@@ -1,0 +1,554 @@
+{
+  "name": "検査結果n8n",
+  "nodes": [
+    {
+      "parameters": {
+        "url": "http://host.docker.internal:8000/trend_n8n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -32,
+        144
+      ],
+      "id": "2f5309f7-41cd-442d-bc5f-acc37739c8d7",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 段階6: 新しい検査結果のときだけ後段へ進める(Scheduleの毎日実行で同じ結果を繰り返し通知しないため)\n// 記録の書き込みはここでは行わない。パイプライン全体が成功した最後のノードで行う(途中失敗時に再試行できるように)\nconst data = $input.first().json;\nconst staticData = $getWorkflowStaticData('global');\n\nconst isTest = $execution.mode === 'test';\nconst isNew = isTest || staticData.lastNotifiedDate !== data.exam_date;\n\nreturn [{\n    json: { ...data, is_new: isNew, last_notified: staticData.lastNotifiedDate ?? null },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        416,
+        144
+      ],
+      "id": "3a5023b7-0ff4-4c4f-a8e0-e9577dd4ea54",
+      "name": "新着判定"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cdbde90b-52e5-4aac-8860-17cf454ff3db",
+              "leftValue": "={{ $json.is_new }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        640,
+        144
+      ],
+      "id": "4f4ab076-89f5-49e7-9995-943a17ca3839",
+      "name": "新しい検査結果か"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/backup_n8n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        2560,
+        -80
+      ],
+      "id": "0992e10c-08e9-46f9-b5a2-f6fddd3d52bf",
+      "name": "スプレッドシート更新"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 段階6: 記録の書き込みをここに移す。パイプライン全体(所見生成・保存)が成功して初めて\n// 「通知済み」とみなす(途中で失敗したら、次回また同じ検査結果を拾い直せるように)\nconst staticData = $getWorkflowStaticData('global');\nconst isTest = $execution.mode === 'test';\nconst examDate = $('新着判定').first().json.exam_date;\n\nif (!isTest) {\n    staticData.lastNotifiedDate = examDate;\n}\n\nreturn $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2784,
+        -80
+      ],
+      "id": "b9133bbc-8df7-4016-b0c0-c1c85b72b70d",
+      "name": "通知済みを記録"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/report_n8n",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ comment: $json.comment }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        2112,
+        -80
+      ],
+      "id": "acdf98d3-7fec-40e6-b3ae-51d2dd2368aa",
+      "name": "PDFレポート生成"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DISCORD_WEBHOOK_URL }}",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "files[0]",
+              "inputDataFieldName": "data"
+            },
+            {
+              "name": "payload_json",
+              "value": "{\"content\": \"検査結果の新しいレポートができました\"}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        2336,
+        -80
+      ],
+      "id": "c1c44c50-2d34-4c69-b24d-aaea1ba4be0a",
+      "name": "Discordへ送信"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 段階7: 通知対象の絞り込み。慢性/急性を問わずすべての範囲外項目を対象にする。\n// 「慢性的に基準値外」フラグ(trend_graph.pyが履歴から機械的に算出)は除外理由にせず、\n// 観測事実の注記としてのみ使う(疾患名や患者像を仮定した理由付けはしない)。\n// 慢性項目は「いつも同じ話」で埋もれやすいため、MAX_ITEMSの枠内で必ず確保する\nconst data = $input.first().json;\nconst summary = data.summary ?? [];\n\nconst MAX_ITEMS = 8;\n\nconst latestDate = summary.reduce((a, s) => (s[\"検査日\"] > a ? s[\"検査日\"] : a), \"\");\n\nfunction parseTarget(raw) {\n    if (!raw) return [null, null];\n    let m = /^([\\d.]+)~([\\d.]+)$/.exec(raw);\n    if (m) return [Number(m[1]), Number(m[2])];\n    m = /^([\\d.]+)以下$/.exec(raw);\n    if (m) return [null, Number(m[1])];\n    m = /^([\\d.]+)以上$/.exec(raw);\n    if (m) return [Number(m[1]), null];\n    return [null, null];\n}\n\nfunction deviation(s) {\n    const [low, high] = parseTarget(s[\"目標値\"]);\n    const v = s[\"検査結果\"];\n    if (low !== null && high !== null) {\n          const width = high - low;\n          return width > 0 ? (v > high ? v - high : low - v) / width : 0;\n    }\n    if (high !== null) return (v - high) / high;\n    if (low !== null) return (low - v) / low;\n    return 0;\n}\n\nconst scored = summary\n  .filter((s) => s[\"判定\"] !== \"範囲内\")\n  .map((s) => {\n        const stale = s[\"検査日\"] !== latestDate;\n        const worsening =\n                (s[\"判定\"] === \"目標範囲より高い\" && s[\"前回との比較\"] === \"上昇\") ||\n                (s[\"判定\"] === \"目標範囲より低い\" && s[\"前回との比較\"] === \"低下\");\n        const item = { ...s, _score: deviation(s) * (worsening ? 1.5 : 1) * (stale ? 0.5 : 1) };\n        const notes = [];\n        if (item[\"注記\"]) notes.push(item[\"注記\"]);\n        if (s[\"慢性的に基準値外\"]) notes.push(\"記録のある全期間で目標範囲外\");\n        if (stale) notes.push(`この値は${s[\"検査日\"]}のもので、最新の${latestDate}では測定されていない`);\n        if (notes.length) item[\"注記\"] = notes.join(\" / \");\n        return item;\n  })\n  .sort((a, b) => b._score - a._score);\n\n// 慢性項目は枠に関わらず必ず含め、残りの枠を急性項目で埋める\nconst chronic = scored.filter((s) => s[\"慢性的に基準値外\"]);\nconst acute = scored.filter((s) => !s[\"慢性的に基準値外\"]);\nconst acuteBudget = Math.max(0, MAX_ITEMS - chronic.length);\nconst picked = [...chronic, ...acute.slice(0, acuteBudget)]\n  .sort((a, b) => b._score - a._score)\n  .map(({ _score, ...rest }) => rest);\n\nreturn [{\n    json: {\n          summary: picked,\n          exam_date: latestDate,\n          total_count: summary.length,\n          out_of_range_count: scored.length,\n          others: acute.slice(acuteBudget).map((s) => s[\"項目名\"]),\n    },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        192,
+        144
+      ],
+      "id": "bb3363bc-5878-4d16-8371-cc549c4ada25",
+      "name": "通知対象の絞り込み"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\nconst lines = data.summary.map((s) => {\n    const full = s[\"正式名称\"] ? `(${s[\"正式名称\"]})` : \"\";\n    const target = s[\"目標値\"] || \"設定なし\";\n    const kind = s[\"目標値の種別\"] || \"\";\n    let line = `${s[\"項目名\"]}${full}: ${s[\"検査結果\"]} (目標値 ${target}[${kind}], ${s[\"判定\"]}`;\n    if (s[\"前回との比較\"]) {\n          line += `, 前回より${s[\"前回との比較\"]}`;\n    }\n    line += \")\";\n    if (s[\"注記\"]) {\n          line += ` ※${s[\"注記\"]}`;\n    }\n    return line;\n});\n\nconst summary_text = lines.join(\"\\n\");\n\nconst prompt = `以下は検査結果の要約です。各項目について、目標値との比較と前回からの変化を踏まえ、\n本人にも分かる言葉で短くコメントしてください。\n\n## 書き方\n- 複数の項目をまとめて1つのコメントにしてはならない。必ず1項目ずつ書く\n- 項目名は入力に書かれたものをそのまま使う。別名に言い換えてはならない\n- 判定と矛盾する評価を併記してはならない。「基準より高いが正常範囲内」のような\n  書き方は禁止。判定が「目標範囲より高い」なら、範囲内とは書かない\n  - 項目名の後の括弧内が正式名称。略号の項目は初出時に一度だけこれを添える\n  - 括弧が無い項目に、正式名称を推測して付けてはならない\n  - 各項目の判定(「範囲内」「目標範囲より高い」「目標範囲より低い」)は、その語を\n    そのままコメントに含める。言い換えたり向きを変えたりしてはならない\n    - 「注記」に情報があれば、その内容を踏まえてコメントする。注記に無い理由を推測で\n      補ってはならない(特定の疾患や患者像を仮定した説明もしない)\n      - 各項目1〜2文\n      - 検査値が示す「状態」の説明にとどめ、薬剤名を挙げた治療の提案はしない\n      - 数値の羅列ではなく、目標範囲との関係と前回からの向きを伝える\n      \n      ## 重要\n      - これは医療アドバイスではありません\n      - 目標値は一般的な目安であり、個別の判断は専門家に委ねてください\n      - 文末に「診断・治療方針は必ず主治医にご確認ください」と明記してください\n      \n      ## 検査結果\n      ${summary_text}`;\n\nreturn [{ json: { summary_text, prompt } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        864,
+        48
+      ],
+      "id": "6fa1623b-ea6c-4945-bf5e-d15415e075e7",
+      "name": "AIパラメータ生成"
+    },
+    {
+      "parameters": {
+        "jsCode": "const text = $input.first().json.content ?? \"\";\n\n// LLMが使いがちな表記を、患者向けの正しい呼称に統一する\nconst TERM_MAP = {\n  \"パラチホモイドホルモン\": \"副甲状腺ホルモン\",\n  \"パラチホイドホルモン\": \"副甲状腺ホルモン\",\n  \"パラサイロイドホルモン\": \"副甲状腺ホルモン\",\n  \"パラトルモン\": \"副甲状腺ホルモン\",\n  \"上皮小体ホルモン\": \"副甲状腺ホルモン\",\n};\n\n// 思考型モデルに差し替えたときのために除去処理は残す\nlet comment = text.replace(/<think>[\\s\\S]*?<\\/think>/g, \"\").trim();\nfor (const [wrong, right] of Object.entries(TERM_MAP)) {\n  comment = comment.replaceAll(wrong, right);\n}\n\n// 「診断・治療方針は…」をLLMが項目ごとに繰り返すことがあるため、\n// コード側で一旦すべて除去し、文末に1回だけ付け直す\nconst DISCLAIMER = \"診断・治療方針は必ず主治医にご確認ください。\";\n// 生成が正常なら、指示どおりLLMは必ず免責文を含めるはず。無ければ途中で\n// 打ち切られた可能性が高いため、ここでエラーにしてPDF送信まで進めない\n// (ネイティブAIノードはdone:falseを検知できないため、この判定で代替する)\nif (!comment.includes(DISCLAIMER)) {\n  throw new Error(`免責文が見つかりません。出力が途中で切れた可能性があります。末尾: ...${comment.slice(-200)}`);\n}\n\ncomment = comment.split(DISCLAIMER).join(\"\").replace(/\\n{3,}/g, \"\\n\\n\").trim();\ncomment += `\\n\\n${DISCLAIMER}`;\n\nconst markdown = `![検査結果推移](http://localhost:8000/trend_n8n_image)\\n\\n${comment}`;\n\nreturn [{ json: { comment, markdown } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1888,
+        -80
+      ],
+      "id": "25acc2cd-e91e-4caf-ae3b-a042c783d678",
+      "name": "結果文書編集"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "qwen2.5:14b-instruct",
+          "mode": "list",
+          "cachedResultName": "qwen2.5:14b-instruct"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "={{ $json.prompt }}"
+            }
+          ]
+        },
+        "options": {
+          "num_predict": 4096,
+          "num_ctx": 8192,
+          "keep_alive": "30m"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.ollama",
+      "typeVersion": 1,
+      "position": [
+        1088,
+        48
+      ],
+      "id": "52102373-70c5-4c97-b872-72ab83f53b3d",
+      "name": "Ollamaへ問い合わせ(AIノード)",
+      "credentials": {
+        "ollamaApi": {
+          "id": "******************",
+          "name": "Ollama account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "2aae7618-3f96-4a96-be9f-41930c43f395",
+              "leftValue": "={{ $json.giveUp }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1888,
+        144
+      ],
+      "id": "796417a9-2c95-41c6-af29-df18578cd872",
+      "name": "試行上限か"
+    },
+    {
+      "parameters": {
+        "jsCode": "const content = $input.first().json.content ?? \"\";\nthrow new Error(`3回試行しましたが、免責文を含む完全な出力が得られませんでした。末尾: ...${content.slice(-200)}`);"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2112,
+        144
+      ],
+      "id": "6df0f4f1-5cfd-4cf4-8d25-b0277c44da26",
+      "name": "リトライ上限エラー"
+    },
+    {
+      "parameters": {
+        "jsCode": "const content = $input.first().json.content ?? \"\";\nconst withoutThink = content.replace(/<think>[\\s\\S]*?<\\/think>/g, \"\").trim();\nconst DISCLAIMER = \"診断・治療方針は必ず主治医にご確認ください。\";\nconst hasDisclaimer = withoutThink.includes(DISCLAIMER);\n\n// $runIndexはこのノード自体の実行回数(0始まり)。ループでOllamaに戻すたびに増える\nconst MAX_ATTEMPTS = 3;\nconst isLastAttempt = $runIndex >= MAX_ATTEMPTS - 1;\n\nreturn [{\n  json: {\n    content,\n    ok: hasDisclaimer,\n    giveUp: !hasDisclaimer && isLastAttempt,\n    prompt: $('AIパラメータ生成').first().json.prompt,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        -32
+      ],
+      "id": "dd9bf0db-7bee-40b5-9c4c-9ed76f2a4f74",
+      "name": "免責文判定"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "4a39b251-d858-472c-bf14-8f185a0478d7",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1664,
+        -32
+      ],
+      "id": "a1bd970d-5d4e-49d0-8b99-589e2661b4ce",
+      "name": "生成OKか"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        864,
+        240
+      ],
+      "id": "bdfc7998-147b-4bb3-851b-c27c14571292",
+      "name": "新着なし(何もしない)"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -256,
+        48
+      ],
+      "id": "5e4e6120-d9f2-4247-b50b-c82fc918b599",
+      "name": "手動実行"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -256,
+        240
+      ],
+      "id": "9611c8c8-5fd5-4d0f-9185-68654f6b05f7",
+      "name": "定時実行(毎日8時)"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "通知対象の絞り込み",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "新着判定": {
+      "main": [
+        [
+          {
+            "node": "新しい検査結果か",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "新しい検査結果か": {
+      "main": [
+        [
+          {
+            "node": "AIパラメータ生成",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "新着なし(何もしない)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "スプレッドシート更新": {
+      "main": [
+        [
+          {
+            "node": "通知済みを記録",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PDFレポート生成": {
+      "main": [
+        [
+          {
+            "node": "Discordへ送信",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Discordへ送信": {
+      "main": [
+        [
+          {
+            "node": "スプレッドシート更新",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "通知対象の絞り込み": {
+      "main": [
+        [
+          {
+            "node": "新着判定",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AIパラメータ生成": {
+      "main": [
+        [
+          {
+            "node": "Ollamaへ問い合わせ(AIノード)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "結果文書編集": {
+      "main": [
+        [
+          {
+            "node": "PDFレポート生成",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollamaへ問い合わせ(AIノード)": {
+      "main": [
+        [
+          {
+            "node": "免責文判定",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "試行上限か": {
+      "main": [
+        [
+          {
+            "node": "リトライ上限エラー",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ollamaへ問い合わせ(AIノード)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "免責文判定": {
+      "main": [
+        [
+          {
+            "node": "生成OKか",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "生成OKか": {
+      "main": [
+        [
+          {
+            "node": "結果文書編集",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "試行上限か",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "手動実行": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "定時実行(毎日8時)": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "919ad63e-daf5-4e33-9a03-daafe0d07581",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "id": "rkyM7ZVcVV5QXsC3",
+  "tags": []
+}
